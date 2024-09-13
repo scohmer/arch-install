@@ -165,12 +165,12 @@ rankmirrors -n 6 /etc/pacman.d/mirrorlist.bak > /etc/pacman.d/mirrorlist
 
 ## Post-configuration & reboot
 
-1. exit chroot \
+1. exit chroot
 
-exit \
+exit
 
-2. unmount recursively \
+2. unmount recursively
 
-umount -R /mnt \
+umount -R /mnt
 
-3. shutdown -r now (or shutdown now if you need to alter your boot order) \
+3. shutdown -r now (or shutdown now if you need to alter your boot order)
