@@ -174,3 +174,18 @@ exit
 umount -R /mnt
 
 3. shutdown -r now (or shutdown now if you need to alter your boot order)
+
+## Install a window manager
+
+### There are many to choose, but a personal favorite ml4w-hyperland
+
+1. pacman -S git less
+2. git clone https://aur.archlinux.org/yay.git
+3. cd yay
+4. makepkg -si
+5. yay -S extra/hyprutils
+6. sudo pacman -Syu
+7. yay -S ml4w-hyprland
+8. ml4w-hyprland-setup
+
+follow the prompts. Answer appropriately. say yes to sddm (it's a non-default option)
