@@ -158,10 +158,10 @@ vi /etc/pacman.conf \
 uncomment> #[multilib] \
 uncomment> #Include = /etc/pacman.d/mirrorlist
 
-pacman -Syu pacman-contrib \
+pacman -Syu pacman-contrib
 
 cp /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.bak \
-rankmirrors -n 6 /etc/pacman.d/mirrorlist.bak > /etc/pacman.d/mirrorlist \
+rankmirrors -n 6 /etc/pacman.d/mirrorlist.bak > /etc/pacman.d/mirrorlist
 
 ## Post-configuration & reboot
 
