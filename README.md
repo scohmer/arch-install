@@ -86,7 +86,7 @@ timedatectl (to confirm Local and Universal time)
 
 6. Install essential packages.
 
-pacstrap -K /mnt base linux linux-firmware base-devel pacman-contrib \
+pacstrap -K /mnt base linux linux-firmware base-devel pacman-contrib
 
 7. Generate file system tables
 
@@ -114,7 +114,7 @@ vi /etc/locale.conf \
 insert: LANG=en_US.UTF-8 \
 export LANG="en_US.UTF-8"
 
-echo "archhostname" > /etc/hostname \
+echo "archhostname" > /etc/hostname
 
 2. configure root password and first non-root account and password, edit sudoers
 
