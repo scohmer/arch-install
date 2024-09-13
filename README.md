@@ -145,7 +145,7 @@ initrd /initramfs-linux.img
 
 ===============================================
 
-echo "options root=PARTUUID=$(blkid -s PARTUUID -o value /dev/sda3) rw" >> /boot/loader/entries/arch.conf \
+echo "options root=PARTUUID=$(blkid -s PARTUUID -o value /dev/sda3) rw" >> /boot/loader/entries/arch.conf
 
 4. install and enable some essential systemd services
 
