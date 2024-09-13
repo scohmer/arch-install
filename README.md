@@ -15,7 +15,9 @@ how to install arch
 
 lsblk (to discover disk device)
 gdisk /dev/<disk device> (for example: /dev/sda)
+
 ================================================
+
 Command (? for help): x
 Expert command (? for help): z
 About to wipe out GPT on /dev/sda. Proceed? (Y/N): y
@@ -24,7 +26,9 @@ Blank out MBR? (Y/N): y
 2. create and format disk partitions
 
 cgdisk /dev/sda
+
 ===============================================
+
 Select the partition type [free space]
 Select [  New   ]
 First sector: <Press Enter>
@@ -133,9 +137,11 @@ bootctl install
 vi /boot/loader/entries/arch.conf
 
 ===============================================
+
 title Arch
 linux /vmlinuz-linux
 initrd /initramfs-linux.img
+
 ===============================================
 
 echo "options root=PARTUUID=$(blkid -s PARTUUID -o value /dev/sda3) rw" >> /boot/loader/entries/arch.conf
