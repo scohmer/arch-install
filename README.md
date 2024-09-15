@@ -94,7 +94,7 @@ genfstab -U /mnt >> /mnt/etc/fstab
 
 8. Change into system root for system configuration
 
-arch-chroot
+arch-chroot /mnt
 
 ## Post installation configuration
 
