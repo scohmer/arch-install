@@ -150,7 +150,6 @@ echo "options root=PARTUUID=$(blkid -s PARTUUID -o value /dev/sda3) rw" >> /boot
 4. install and enable some essential systemd services
 
 pacman -S dhcpcd \
-systemctl enable dhcpcd@ens18 (type ip addr to confirm your network connection for the network interface after the @ symbol)
 
 systemctl enable fstrim.timer
 
@@ -158,7 +157,10 @@ vi /etc/pacman.conf \
 uncomment> #[multilib] \
 uncomment> #Include = /etc/pacman.d/mirrorlist
 
-pacman -Syu pacman-contrib
+pacman -Syu pacman-contrib networkmanager openssh
+
+systemctl enable NetworkManager
+systemctl enable openssh
 
 cp /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.bak \
 rankmirrors -n 6 /etc/pacman.d/mirrorlist.bak > /etc/pacman.d/mirrorlist
