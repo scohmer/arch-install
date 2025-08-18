@@ -27,6 +27,7 @@ ensure_disk_free() {
   DEV="$1"
   umount -R /mnt 2>/dev/null || true
   swapoff -a 2>/dev/null || true
+  # Deactivate all VGs and remove any dm maps
   vgchange -an 2>/dev/null || true
   dmsetup remove_all 2>/dev/null || true
   udevadm settle || true
@@ -43,7 +44,7 @@ rereadpt_wait() {
   while [ "$n" -le "$EXPECT" ]; do
     P="${DEV}${PSUF}${n}"
     i=0
-    while [ $i -lt 60 ] && [ ! -b "$P" ]; do i=$((i+1)); sleep 0.1; done
+    while [ $i -lt 80 ] && [ ! -b "$P" ]; do i=$((i+1)); sleep 0.1; done
     n=$((n+1))
   done
 }
@@ -58,9 +59,9 @@ partition_disk() {
 
   if [ "$UEFI" -eq 1 ]; then
     # UEFI: 1=ESP (ef00), 2=/boot (8300), 3=LVM PV (8e00)
-    sgdisk -n 1:1MiB:"$ESP_SIZE"  -t 1:ef00 -c 1:"ESP"   "$DEV"
-    sgdisk -n 2:0:"$BOOT_SIZE"    -t 2:8300 -c 2:"BOOT"  "$DEV"
-    sgdisk -n 3:0:0               -t 3:8e00 -c 3:"LVM"   "$DEV"
+    sgdisk -n 1:1MiB:"$ESP_SIZE"  -t 1:ef00 -c 1:"ESP"    "$DEV"
+    sgdisk -n 2:0:"$BOOT_SIZE"    -t 2:8300 -c 2:"BOOT"   "$DEV"
+    sgdisk -n 3:0:0               -t 3:8e00 -c 3:"LVM"    "$DEV"
     rereadpt_wait "$DEV" 3
   else
     # BIOS: 1=BIOS boot (ef02), 2=/boot (8300), 3=LVM PV (8e00)
@@ -86,6 +87,32 @@ calc_parts() {
     P_BIOS="${DEV}${PSUF}1"
   fi
   printf '%s;%s;%s;%s\n' "$P_ESP" "$P_BIOS" "$P_BOOT" "$P_LVM"
+}
+
+# Clean any pre-existing VG/PV on the target devices
+purge_old_metadata() {
+  P_LVM="$1"; P_BOOT="$2"; P_ESP="$3"
+  # Deactivate all VGs to unblock exclusive opens
+  vgchange -an 2>/dev/null || true
+
+  # Remove existing VG named $VG_NAME if present
+  if vgs --noheadings -o vg_name 2>/dev/null | awk '{$1=$1}1' | grep -qx "$VG_NAME"; then
+    msg "Removing existing VG $VG_NAME"
+    lvchange -an "$VG_NAME" 2>/dev/null || true
+    vgremove -ff -y "$VG_NAME" 2>/dev/null || true
+  fi
+
+  # Wipe all FS/LVM signatures on our new partitions
+  [ -n "$P_ESP"  ] && wipefs -af "$P_ESP"  2>/dev/null || true
+  wipefs -af "$P_BOOT" 2>/dev/null || true
+  wipefs -af "$P_LVM"  2>/dev/null || true
+
+  # If PV metadata still lingers, force pvremove
+  if pvs --noheadings -o pv_name 2>/dev/null | grep -q "^$P_LVM\$"; then
+    pvremove -ff -y "$P_LVM" 2>/dev/null || true
+  fi
+
+  udevadm settle || true
 }
 
 ###############################################################################
@@ -132,6 +159,9 @@ IFS=';' read -r P_ESP P_BIOS P_BOOT P_LVM <<EOF
 $(calc_parts "$SELECTED_DEV")
 EOF
 
+msg "Purging any old FS/LVM metadata on new partitions"
+purge_old_metadata "$P_LVM" "$P_BOOT" "${P_ESP:-}"
+
 msg "Partition map"
 lsblk -no NAME,TYPE,SIZE "$SELECTED_DEV" || true
 
@@ -143,8 +173,11 @@ msg "Creating filesystems"
 mkfs.ext4 -L boot "$P_BOOT"
 
 msg "Setting up LVM"
+# One more settle to ensure exclusive access succeeds
+partprobe "$SELECTED_DEV" 2>/dev/null || true
+udevadm settle || true
+
 pvcreate -ff -y "$P_LVM"
-vgchange -an "$VG_NAME" 2>/dev/null || true
 vgcreate "$VG_NAME" "$P_LVM"
 
 lvcreate -L "$ROOT_SIZE"          -n root          "$VG_NAME"
