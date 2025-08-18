@@ -225,23 +225,36 @@ echo
 msg "Current mounts under /mnt"
 findmnt -Rno TARGET,SOURCE /mnt || true
 
+###############################################################################
+# Bootstrap base system, write fstab, run setup.sh inside chroot
+###############################################################################
+msg "Bootstrapping base system (pacstrap)"
+# Core plus tools needed by setup.sh. Microcode added in setup.sh.
+pacstrap /mnt base linux linux-firmware lvm2 grub efibootmgr networkmanager openssh sudo vim reflector
+
+msg "Generating fstab"
+genfstab -U /mnt >> /mnt/etc/fstab
+echo "==> /etc/fstab:"
+tail -n +1 /mnt/etc/fstab
+
+# Copy setup.sh into the new system and run it in chroot
+if [ -f "./setup.sh" ]; then
+  install -Dm755 ./setup.sh /mnt/root/setup.sh
+else
+  echo "ERROR: ./setup.sh not found next to install.sh"; exit 1
+fi
+
+# Pass the selected disk (needed for BIOS grub-install) and optional overrides
+msg "Entering chroot to run setup.sh"
+arch-chroot /mnt /bin/env \
+  DISK="$SELECTED_DEV" \
+  TZ="${TZ:-America/New_York}" \
+  HOSTNAME="${HOSTNAME:-archlinux}" \
+  USERNAME="${USERNAME:-archuser}" \
+  USER_PASSWORD="${USER_PASSWORD:-changeme}" \
+  ROOT_PASSWORD="${ROOT_PASSWORD:-root}" \
+  SUDO_NOPASSWD="${SUDO_NOPASSWD:-0}" \
+  /root/setup.sh
+
 echo
-msg "Next steps"
-cat <<'EOT'
-  pacstrap /mnt base linux linux-firmware lvm2
-  genfstab -U /mnt >> /mnt/etc/fstab
-  arch-chroot /mnt
-
-  UEFI + GRUB:
-    pacman -S grub efibootmgr
-    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB
-    grub-mkconfig -o /boot/grub/grub.cfg
-
-  BIOS + GRUB (no ESP):
-    grub-install --target=i386-pc /dev/DEVICE
-    grub-mkconfig -o /boot/grub/grub.cfg
-
-  Optional fstab hardening:
-    - /tmp, /var/tmp: nodev,nosuid,noexec
-    - /var/log, /var/log/audit: nodev,nosuid
-EOT
+msg "All done! You can now 'reboot' (remove install media)."
