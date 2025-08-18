@@ -6,10 +6,10 @@ set -eu
 ###############################################################################
 VG_NAME="arch"
 
-ESP_SIZE="+600MiB"   # UEFI only (FAT32)
-BOOT_SIZE="+1GiB"    # /boot outside LVM (ext4)
+ESP_SIZE="+600MiB"    # UEFI only (FAT32)
+BOOT_SIZE="+1GiB"     # /boot outside LVM (ext4)
 
-# LV sizes (adjust as you wish); /home takes the remainder
+# LV sizes; /home takes the remainder
 ROOT_SIZE="40G"
 VAR_SIZE="20G"
 VAR_LOG_SIZE="8G"
@@ -48,7 +48,7 @@ rereadpt_wait() {
   done
 }
 
-# Create partitions with sgdisk (resilient, no arithmetic in shell)
+# Create partitions with sgdisk (no fragile math)
 partition_disk() {
   DEV="$1"
   UEFI=0; [ -d /sys/firmware/efi ] && UEFI=1
@@ -63,7 +63,7 @@ partition_disk() {
     sgdisk -n 3:0:0               -t 3:8e00 -c 3:"LVM"   "$DEV"
     rereadpt_wait "$DEV" 3
   else
-    # BIOS: 1=BIOS boot (ef02), 2=/boot (8300), 3=LVM (8e00)
+    # BIOS: 1=BIOS boot (ef02), 2=/boot (8300), 3=LVM PV (8e00)
     sgdisk -n 1:1MiB:+1MiB        -t 1:ef02 -c 1:"BIOSBOOT" "$DEV"
     sgdisk -n 2:0:"$BOOT_SIZE"    -t 2:8300 -c 2:"BOOT"     "$DEV"
     sgdisk -n 3:0:0               -t 3:8e00 -c 3:"LVM"      "$DEV"
@@ -86,23 +86,6 @@ calc_parts() {
     P_BIOS="${DEV}${PSUF}1"
   fi
   printf '%s;%s;%s;%s\n' "$P_ESP" "$P_BIOS" "$P_BOOT" "$P_LVM"
-}
-
-# Safe mkdir for mount points
-ensure_dir() {
-  d="$1"
-  [ -d "$d" ] || mkdir -p "$d"
-}
-
-# Mount device to path if not already mounted; creates the path
-mount_dev() {
-  dev="$1"; mnt="$2"
-  ensure_dir "$mnt"
-  if findmnt -rn --target "$mnt" >/dev/null 2>&1; then
-    echo "Already mounted: $mnt"
-  else
-    mount "$dev" "$mnt"
-  fi
 }
 
 ###############################################################################
@@ -183,27 +166,38 @@ mkfs.ext4 -L opt           "/dev/$VG_NAME/opt"
 mkfs.ext4 -L home          "/dev/$VG_NAME/home"
 
 ###############################################################################
-# Mount in correct order, creating mountpoints as needed
+# Mount in strict order, creating mount points before and after parents
 ###############################################################################
+msg "Creating mount directory tree (pre-create)"
+mkdir -p /mnt \
+         /mnt/boot /mnt/boot/efi \
+         /mnt/var /mnt/var/log /mnt/var/log/audit /mnt/var/tmp \
+         /mnt/tmp /mnt/opt /mnt/home
+
 msg "Mounting filesystems (ordered)"
-
 # 1) Root first
-mount_dev "/dev/$VG_NAME/root" /mnt
+mount /dev/"$VG_NAME"/root /mnt
 
-# 2) /boot (partition) then /boot/efi (if UEFI)
-mount_dev "$P_BOOT" /mnt/boot
-[ -n "$P_ESP" ] && mount_dev "$P_ESP" /mnt/boot/efi
+# Ensure children exist inside the mounted root
+mkdir -p /mnt/boot /mnt/boot/efi \
+         /mnt/var /mnt/var/log /mnt/var/log/audit /mnt/var/tmp \
+         /mnt/tmp /mnt/opt /mnt/home
 
-# 3) /var (parent), then its children (log → audit, tmp)
-mount_dev "/dev/$VG_NAME/var" /mnt/var
-mount_dev "/dev/$VG_NAME/var_log" /mnt/var/log
-mount_dev "/dev/$VG_NAME/var_log_audit" /mnt/var/log/audit
-mount_dev "/dev/$VG_NAME/var_tmp" /mnt/var/tmp
+# 2) /boot (real partition), then /boot/efi (if UEFI)
+mount "$P_BOOT" /mnt/boot
+[ -n "${P_ESP:-}" ] && { mkdir -p /mnt/boot/efi; mount "$P_ESP" /mnt/boot/efi; }
+
+# 3) /var (parent), then its children
+mount /dev/"$VG_NAME"/var /mnt/var
+mkdir -p /mnt/var/log /mnt/var/log/audit /mnt/var/tmp
+mount /dev/"$VG_NAME"/var_log        /mnt/var/log
+mount /dev/"$VG_NAME"/var_log_audit  /mnt/var/log/audit
+mount /dev/"$VG_NAME"/var_tmp        /mnt/var/tmp
 
 # 4) Other top-level mounts
-mount_dev "/dev/$VG_NAME/tmp"  /mnt/tmp
-mount_dev "/dev/$VG_NAME/opt"  /mnt/opt
-mount_dev "/dev/$VG_NAME/home" /mnt/home
+mount /dev/"$VG_NAME"/tmp  /mnt/tmp
+mount /dev/"$VG_NAME"/opt  /mnt/opt
+mount /dev/"$VG_NAME"/home /mnt/home
 
 echo
 msg "Current mounts under /mnt"
