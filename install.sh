@@ -178,7 +178,7 @@ lvcreate -L "$VAR_LOG_AUDIT_SIZE" -n var_log_audit "$VG_NAME"
 lvcreate -L "$VAR_TMP_SIZE"       -n var_tmp       "$VG_NAME"
 lvcreate -L "$TMP_SIZE"           -n tmp           "$VG_NAME"
 lvcreate -L "$OPT_SIZE"           -n opt           "$VG_NAME"
-lvcreate -l "$HOME_SIZE"          -n home          "$VG_NAME"
+lvcreate -L "$HOME_SIZE"          -n home          "$VG_NAME"
 
 mkfs.ext4 -L root          "/dev/$VG_NAME/root"
 mkfs.ext4 -L var           "/dev/$VG_NAME/var"
@@ -227,26 +227,28 @@ msg "Current mounts under /mnt"
 findmnt -Rno TARGET,SOURCE /mnt || true
 
 ###############################################################################
-# Bootstrap base system, write fstab, run setup.sh inside chroot
+# Bootstrap base system, write fstab, run setup.sh and hyprland.sh inside chroot
 ###############################################################################
 msg "Bootstrapping base system (pacstrap)"
-# Core plus tools needed by setup.sh. Microcode added in setup.sh.
 pacstrap /mnt base linux linux-firmware lvm2 grub efibootmgr networkmanager openssh sudo vim reflector
 
 msg "Generating fstab"
 genfstab -U /mnt >> /mnt/etc/fstab
-echo "==> /etc/fstab:"
-tail -n +1 /mnt/etc/fstab
 
-# Copy setup.sh into the new system and run it in chroot
+# Copy scripts into the target
 if [ -f "./setup.sh" ]; then
   install -Dm755 ./setup.sh /mnt/root/setup.sh
 else
-  echo "ERROR: ./setup.sh not found next to install.sh"; exit 1
+  echo "ERROR: ./setup.sh not found"; exit 1
 fi
 
-# Pass the selected disk (needed for BIOS grub-install) and optional overrides
-msg "Entering chroot to run setup.sh"
+if [ -f "./hyprland.sh" ]; then
+  install -Dm755 ./hyprland.sh /mnt/root/hyprland.sh
+else
+  echo "ERROR: ./hyprland.sh not found"; exit 1
+fi
+
+msg "Running setup.sh in chroot"
 arch-chroot /mnt /bin/env \
   DISK="$SELECTED_DEV" \
   TZ="${TZ:-America/New_York}" \
@@ -257,5 +259,11 @@ arch-chroot /mnt /bin/env \
   SUDO_NOPASSWD="${SUDO_NOPASSWD:-0}" \
   /root/setup.sh
 
+msg "Running hyprland.sh in chroot"
+arch-chroot /mnt /bin/env \
+  USERNAME="${USERNAME:-archuser}" \
+  RUN_GPU_AUTO=1 \
+  /root/hyprland.sh
+
 echo
-msg "All done! You can now 'reboot' (remove install media)."
+msg "All done! Eject install media and reboot to log in via greetd (tuigreet) and start Hyprland."
