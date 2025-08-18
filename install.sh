@@ -17,6 +17,7 @@ VAR_LOG_AUDIT_SIZE="2G"
 VAR_TMP_SIZE="8G"
 TMP_SIZE="8G"
 OPT_SIZE="10G"
+HOME_SIZE="50G"
 
 ###############################################################################
 # Helpers
@@ -177,7 +178,7 @@ lvcreate -L "$VAR_LOG_AUDIT_SIZE" -n var_log_audit "$VG_NAME"
 lvcreate -L "$VAR_TMP_SIZE"       -n var_tmp       "$VG_NAME"
 lvcreate -L "$TMP_SIZE"           -n tmp           "$VG_NAME"
 lvcreate -L "$OPT_SIZE"           -n opt           "$VG_NAME"
-lvcreate -l 100%FREE              -n home          "$VG_NAME"
+lvcreate -l "$HOME_SIZE"          -n home          "$VG_NAME"
 
 mkfs.ext4 -L root          "/dev/$VG_NAME/root"
 mkfs.ext4 -L var           "/dev/$VG_NAME/var"
