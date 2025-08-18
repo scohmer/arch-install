@@ -27,7 +27,6 @@ ensure_disk_free() {
   DEV="$1"
   umount -R /mnt 2>/dev/null || true
   swapoff -a 2>/dev/null || true
-  # Deactivate all VGs and remove any dm maps
   vgchange -an 2>/dev/null || true
   dmsetup remove_all 2>/dev/null || true
   udevadm settle || true
@@ -92,26 +91,18 @@ calc_parts() {
 # Clean any pre-existing VG/PV on the target devices
 purge_old_metadata() {
   P_LVM="$1"; P_BOOT="$2"; P_ESP="$3"
-  # Deactivate all VGs to unblock exclusive opens
   vgchange -an 2>/dev/null || true
-
-  # Remove existing VG named $VG_NAME if present
   if vgs --noheadings -o vg_name 2>/dev/null | awk '{$1=$1}1' | grep -qx "$VG_NAME"; then
     msg "Removing existing VG $VG_NAME"
     lvchange -an "$VG_NAME" 2>/dev/null || true
     vgremove -ff -y "$VG_NAME" 2>/dev/null || true
   fi
-
-  # Wipe all FS/LVM signatures on our new partitions
   [ -n "$P_ESP"  ] && wipefs -af "$P_ESP"  2>/dev/null || true
   wipefs -af "$P_BOOT" 2>/dev/null || true
   wipefs -af "$P_LVM"  2>/dev/null || true
-
-  # If PV metadata still lingers, force pvremove
   if pvs --noheadings -o pv_name 2>/dev/null | grep -q "^$P_LVM\$"; then
     pvremove -ff -y "$P_LVM" 2>/dev/null || true
   fi
-
   udevadm settle || true
 }
 
@@ -173,7 +164,6 @@ msg "Creating filesystems"
 mkfs.ext4 -L boot "$P_BOOT"
 
 msg "Setting up LVM"
-# One more settle to ensure exclusive access succeeds
 partprobe "$SELECTED_DEV" 2>/dev/null || true
 udevadm settle || true
 
@@ -199,33 +189,32 @@ mkfs.ext4 -L opt           "/dev/$VG_NAME/opt"
 mkfs.ext4 -L home          "/dev/$VG_NAME/home"
 
 ###############################################################################
-# Mount in strict order, creating mount points before and after parents
+# Mount in strict order, creating dirs AFTER each parent mount
 ###############################################################################
-msg "Creating mount directory tree (pre-create)"
-mkdir -p /mnt \
-         /mnt/boot /mnt/boot/efi \
-         /mnt/var /mnt/var/log /mnt/var/log/audit /mnt/var/tmp \
-         /mnt/tmp /mnt/opt /mnt/home
+msg "Pre-creating top-level mountpoints"
+mkdir -p /mnt /mnt/boot /mnt/boot/efi /mnt/var /mnt/tmp /mnt/opt /mnt/home
 
 msg "Mounting filesystems (ordered)"
-# 1) Root first
+# 1) Root
 mount /dev/"$VG_NAME"/root /mnt
 
-# Ensure children exist inside the mounted root
-mkdir -p /mnt/boot /mnt/boot/efi \
-         /mnt/var /mnt/var/log /mnt/var/log/audit /mnt/var/tmp \
-         /mnt/tmp /mnt/opt /mnt/home
+# Ensure top-level dirs INSIDE root
+mkdir -p /mnt/boot /mnt/var /mnt/tmp /mnt/opt /mnt/home
 
-# 2) /boot (real partition), then /boot/efi (if UEFI)
+# 2) /boot and /boot/efi
 mount "$P_BOOT" /mnt/boot
-[ -n "${P_ESP:-}" ] && { mkdir -p /mnt/boot/efi; mount "$P_ESP" /mnt/boot/efi; }
+if [ -n "${P_ESP:-}" ]; then
+  mkdir -p /mnt/boot/efi
+  mount "$P_ESP" /mnt/boot/efi
+fi
 
-# 3) /var (parent), then its children
+# 3) /var then its children
 mount /dev/"$VG_NAME"/var /mnt/var
-mkdir -p /mnt/var/log /mnt/var/log/audit /mnt/var/tmp
-mount /dev/"$VG_NAME"/var_log        /mnt/var/log
-mount /dev/"$VG_NAME"/var_log_audit  /mnt/var/log/audit
-mount /dev/"$VG_NAME"/var_tmp        /mnt/var/tmp
+mkdir -p /mnt/var/log /mnt/var/tmp
+mount /dev/"$VG_NAME"/var_log /mnt/var/log
+mkdir -p /mnt/var/log/audit
+mount /dev/"$VG_NAME"/var_log_audit /mnt/var/log/audit
+mount /dev/"$VG_NAME"/var_tmp /mnt/var/tmp
 
 # 4) Other top-level mounts
 mount /dev/"$VG_NAME"/tmp  /mnt/tmp
