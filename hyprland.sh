@@ -39,8 +39,8 @@ pacman -Sy --noconfirm --needed \
   brightnessctl playerctl pavucontrol \
   noto-fonts noto-fonts-emoji ttf-dejavu
 
-# Login manager: greetd + tui greeter (works great on bare Wayland)
-pacman -Sy --noconfirm --needed greetd tuigreet
+# Login manager: greetd + console greeter (tuigreet via greetd-tuigreet)
+pacman -Sy --noconfirm --needed greetd greetd-tuigreet
 
 # Optional Qt Wayland bits
 pacman -Sy --noconfirm --needed qt5-wayland qt6-wayland
@@ -179,6 +179,29 @@ install -d -m 755 "$USER_HOME/.config/wofi"
 
 # Ensure user owns the files
 chown -R "$USERNAME":"$USERNAME" "$USER_HOME/.config"
+
+# Default shell for the user (robust: install, register, then switch if needed)
+: "${DEFAULT_SHELL:=/usr/bin/zsh}"        # set to /bin/bash or /usr/bin/zsh, etc.
+
+# Install the shell if needed
+case "$DEFAULT_SHELL" in
+  */zsh)  pacman -Sy --noconfirm --needed zsh  ;;
+  */bash) pacman -Sy --noconfirm --needed bash ;;  # usually already present
+  *)      echo "NOTE: DEFAULT_SHELL=$DEFAULT_SHELL; ensure its package is installed";;
+esac
+
+# Make sure /etc/shells contains the target path
+grep -qx "$DEFAULT_SHELL" /etc/shells 2>/dev/null || echo "$DEFAULT_SHELL" >> /etc/shells
+
+# Change the user’s shell only if different
+CURRENT_SHELL="$(getent passwd "$USERNAME" | cut -d: -f7 || echo /bin/bash)"
+if [ "$CURRENT_SHELL" != "$DEFAULT_SHELL" ]; then
+  echo "Setting login shell for $USERNAME → $DEFAULT_SHELL"
+  chsh -s "$DEFAULT_SHELL" "$USERNAME" || echo "WARN: chsh failed (shell unchanged)"
+else
+  echo "Login shell already $DEFAULT_SHELL; skipping chsh"
+fi
+
 
 # User lingering (so user units can run after login if needed)
 loginctl enable-linger "$USERNAME" 2>/dev/null || true
