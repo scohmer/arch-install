@@ -2,7 +2,13 @@
 
 how to install arch
 
-## Pre-installation
+## Automated Installation
+1. wget or curl each of the three .sh files
+2. chmod +x *.sh
+3. ./install.sh
+4. If you wish to customize username, password, hostname, etc, pass those as environment variables
+
+## MANUAL: Pre-installation
 
 1. ensure the iso is in the virtual drive, or that you have made a bootable disk from the iso with balena etcher.
 2. ensure you're using UEFI
@@ -10,7 +16,7 @@ how to install arch
 3. boot to disk or virtual iso
 4. select arch install
 
-## At-the-shell: Pre-installation configuration
+## MANUAL: At-the-shell: Pre-installation configuration
 
 1. Prepare the MBR
 
@@ -177,7 +183,7 @@ umount -R /mnt
 
 3. shutdown -r now (or shutdown now if you need to alter your boot order)
 
-## Install a window manager
+## MANUAL: Install a window manager (note: ml4w uses dI now, so I doubt this installation method still works)
 
 ### There are many to choose, but a personal favorite ml4w-hyperland
 
