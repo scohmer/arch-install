@@ -230,7 +230,7 @@ findmnt -Rno TARGET,SOURCE /mnt || true
 # Bootstrap base system, write fstab, run setup.sh and hyprland.sh inside chroot
 ###############################################################################
 msg "Bootstrapping base system (pacstrap)"
-pacstrap /mnt base base-devel linux linux-firmware lvm2 grub efibootmgr networkmanager openssh pacman-contrib sudo vim reflector
+pacstrap /mnt base linux linux-firmware lvm2 grub efibootmgr networkmanager openssh sudo vim reflector sddm qt6-wayland
 
 msg "Generating fstab"
 genfstab -U /mnt >> /mnt/etc/fstab
