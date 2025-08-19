@@ -92,18 +92,36 @@ echo "==> Pacman: enable Color & ParallelDownloads"
 sed -i 's/^#Color/Color/' /etc/pacman.conf
 sed -i 's/^#ParallelDownloads = .*/ParallelDownloads = 10/' /etc/pacman.conf
 
-# 11) Install yay (AUR helper) — build as user, install as root (no sudo prompt)
+# 11) Install yay (AUR helper) — robust DNS/CA + retry/fallback
 if ! command -v yay >/dev/null 2>&1; then
+  echo "==> Ensuring DNS & CA certs inside chroot"
+  # If resolv.conf lacks nameservers, seed some
+  if ! grep -Eq '^\s*nameserver\s' /etc/resolv.conf 2>/dev/null; then
+    printf 'nameserver 1.1.1.1\nnameserver 9.9.9.9\nnameserver 8.8.8.8\n' >/etc/resolv.conf
+  fi
+  pacman -Sy --noconfirm --needed ca-certificates ca-certificates-mozilla ca-certificates-utils curl
+  update-ca-trust
+
   echo "==> Installing prerequisites for yay (git, base-devel, go)"
   pacman -Sy --noconfirm --needed git base-devel go
 
-  echo "==> Cloning and building yay as $USERNAME"
+  echo "==> Cloning and building yay as $USERNAME (with retries/fallback)"
   sudo -u "$USERNAME" bash -lc '
     set -e
-    mkdir -p "$HOME/.local/src"
-    cd "$HOME/.local/src"
+    SRC="$HOME/.local/src"
+    mkdir -p "$SRC"
+    cd "$SRC"
     rm -rf yay
-    git clone https://aur.archlinux.org/yay.git
+    # Try normal clone
+    if ! git clone https://aur.archlinux.org/yay.git; then
+      echo "[warn] git clone failed; trying IPv4 + HTTP/1.1…"
+      if ! git -c http.version=HTTP/1.1 -c http.lowSpeedLimit=0 clone https://aur.archlinux.org/yay.git; then
+        echo "[warn] Falling back to AUR snapshot tarball…"
+        rm -f yay.tar.gz
+        curl -L --retry 5 --retry-delay 2 -o yay.tar.gz https://aur.archlinux.org/cgit/aur.git/snapshot/yay.tar.gz
+        tar -xzf yay.tar.gz
+      fi
+    fi
     cd yay
     makepkg -s --noconfirm --clean --cleanbuild
   '
@@ -118,5 +136,3 @@ if ! command -v yay >/dev/null 2>&1; then
 else
   echo "==> yay already installed; skipping"
 fi
-
-echo "==> Setup complete. You can exit chroot and reboot."
