@@ -92,46 +92,70 @@ echo "==> Pacman: enable Color & ParallelDownloads"
 sed -i 's/^#Color/Color/' /etc/pacman.conf
 sed -i 's/^#ParallelDownloads = .*/ParallelDownloads = 10/' /etc/pacman.conf
 
-# 11) Install yay (AUR helper) — robust DNS/CA + retry/fallback
+# 11) Install yay (AUR helper) — robust: try AUR, fallback to GitHub Go build
 if ! command -v yay >/dev/null 2>&1; then
   echo "==> Ensuring DNS & CA certs inside chroot"
-  # If resolv.conf lacks nameservers, seed some
   if ! grep -Eq '^\s*nameserver\s' /etc/resolv.conf 2>/dev/null; then
     printf 'nameserver 1.1.1.1\nnameserver 9.9.9.9\nnameserver 8.8.8.8\n' >/etc/resolv.conf
   fi
-  pacman -Sy --noconfirm --needed ca-certificates ca-certificates-mozilla ca-certificates-utils curl
-  update-ca-trust
+  pacman -Sy --noconfirm --needed ca-certificates ca-certificates-mozilla ca-certificates-utils curl git base-devel go
+  update-ca-trust || true
 
-  echo "==> Installing prerequisites for yay (git, base-devel, go)"
-  pacman -Sy --noconfirm --needed git base-devel go
-
-  echo "==> Cloning and building yay as $USERNAME (with retries/fallback)"
-  sudo -u "$USERNAME" bash -lc '
-    set -e
-    SRC="$HOME/.local/src"
-    mkdir -p "$SRC"
-    cd "$SRC"
-    rm -rf yay
-    # Try normal clone
-    if ! git clone https://aur.archlinux.org/yay.git; then
+  # Helper: try to clone from AUR with some common workarounds
+  try_aur_clone() {
+    sudo -u "$USERNAME" bash -lc '
+      set -e
+      SRC="$HOME/.local/src"; mkdir -p "$SRC"; cd "$SRC"; rm -rf yay
+      # normal attempt
+      git clone https://aur.archlinux.org/yay.git && exit 0
       echo "[warn] git clone failed; trying IPv4 + HTTP/1.1…"
-      if ! git -c http.version=HTTP/1.1 -c http.lowSpeedLimit=0 clone https://aur.archlinux.org/yay.git; then
-        echo "[warn] Falling back to AUR snapshot tarball…"
-        rm -f yay.tar.gz
-        curl -L --retry 5 --retry-delay 2 -o yay.tar.gz https://aur.archlinux.org/cgit/aur.git/snapshot/yay.tar.gz
-        tar -xzf yay.tar.gz
-      fi
-    fi
-    cd yay
-    makepkg -s --noconfirm --clean --cleanbuild
-  '
+      git -c http.version=HTTP/1.1 -c http.lowSpeedLimit=0 clone https://aur.archlinux.org/yay.git && exit 0
+      echo "[warn] Falling back to AUR snapshot tarball…"
+      rm -f yay.tar.gz
+      curl -4 -L --retry 5 --retry-delay 2 -o yay.tar.gz https://aur.archlinux.org/cgit/aur.git/snapshot/yay.tar.gz
+      tar -xzf yay.tar.gz
+    '
+  }
 
-  echo "==> Installing built yay package"
-  PKG_PATH="$(su - "$USERNAME" -c "ls -1 \$HOME/.local/src/yay/yay-*.pkg.tar.* 2>/dev/null | tail -n1")"
-  if [ -n "$PKG_PATH" ] && [ -f "$PKG_PATH" ]; then
-    pacman -U --noconfirm "$PKG_PATH"
+  # Helper: build yay from AUR sources that now exist in $HOME/.local/src/yay
+  build_aur_yay() {
+    sudo -u "$USERNAME" bash -lc '
+      set -e
+      cd "$HOME/.local/src/yay"
+      makepkg -s --noconfirm --clean --cleanbuild
+    '
+  }
+
+  # Helper: as last resort, build yay directly from upstream with Go
+  build_go_yay() {
+    echo "==> AUR unreachable; building yay from upstream via Go"
+    sudo -u "$USERNAME" bash -lc '
+      set -e
+      export GOBIN="$HOME/.local/bin"
+      mkdir -p "$GOBIN"
+      go install github.com/Jguer/yay/v12@latest
+      [ -x "$HOME/.local/bin/yay" ]
+    '
+    install -Dm755 "/home/$USERNAME/.local/bin/yay" /usr/local/bin/yay
+  }
+
+  echo "==> Cloning and building yay as $USERNAME (AUR → snapshot → Go fallback)"
+  if try_aur_clone; then
+    if build_aur_yay; then
+      PKG_PATH="$(su - "$USERNAME" -c "ls -1 \$HOME/.local/src/yay/yay-*.pkg.tar.* 2>/dev/null | tail -n1")"
+      if [ -n "$PKG_PATH" ] && [ -f "$PKG_PATH" ]; then
+        pacman -U --noconfirm "$PKG_PATH"
+      else
+        echo "[warn] Built package not found; falling back to Go binary"
+        build_go_yay
+      fi
+    else
+      echo "[warn] makepkg failed; falling back to Go binary"
+      build_go_yay
+    fi
   else
-    echo "ERROR: Could not find built yay package at \$HOME/.local/src/yay/"; exit 1
+    echo "[warn] Could not fetch AUR sources; using Go fallback"
+    build_go_yay
   fi
 else
   echo "==> yay already installed; skipping"
