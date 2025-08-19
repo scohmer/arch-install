@@ -36,7 +36,6 @@ EOF
 # 4) mkinitcpio — ensure lvm2 in HOOKS then rebuild
 echo "==> mkinitcpio: ensure lvm2 hook"
 if ! grep -q '^[[:space:]]*HOOKS=.*lvm2' /etc/mkinitcpio.conf; then
-  # Insert lvm2 just before 'filesystems' if not present
   sed -i 's/\(HOOKS=.*\)filesystems/\1lvm2 filesystems/' /etc/mkinitcpio.conf
 fi
 mkinitcpio -P
@@ -92,5 +91,32 @@ systemctl enable fstrim.timer
 echo "==> Pacman: enable Color & ParallelDownloads"
 sed -i 's/^#Color/Color/' /etc/pacman.conf
 sed -i 's/^#ParallelDownloads = .*/ParallelDownloads = 10/' /etc/pacman.conf
+
+# 11) Install yay (AUR helper) — build as user, install as root (no sudo prompt)
+if ! command -v yay >/dev/null 2>&1; then
+  echo "==> Installing prerequisites for yay (git, base-devel, go)"
+  pacman -Sy --noconfirm --needed git base-devel go
+
+  echo "==> Cloning and building yay as $USERNAME"
+  sudo -u "$USERNAME" bash -lc '
+    set -e
+    mkdir -p "$HOME/.local/src"
+    cd "$HOME/.local/src"
+    rm -rf yay
+    git clone https://aur.archlinux.org/yay.git
+    cd yay
+    makepkg -s --noconfirm --clean --cleanbuild
+  '
+
+  echo "==> Installing built yay package"
+  PKG_PATH="$(su - "$USERNAME" -c "ls -1 \$HOME/.local/src/yay/yay-*.pkg.tar.* 2>/dev/null | tail -n1")"
+  if [ -n "$PKG_PATH" ] && [ -f "$PKG_PATH" ]; then
+    pacman -U --noconfirm "$PKG_PATH"
+  else
+    echo "ERROR: Could not find built yay package at \$HOME/.local/src/yay/"; exit 1
+  fi
+else
+  echo "==> yay already installed; skipping"
+fi
 
 echo "==> Setup complete. You can exit chroot and reboot."
