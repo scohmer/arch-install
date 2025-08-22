@@ -1,201 +1,319 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# =========================
-#  Arch + SDDM + ml4w Hyprland
-#  Single-run installer
-# =========================
+###############################################################################
+# CONFIG — tweak sizes to control free VG space for future LVM extends
+###############################################################################
+VG_NAME="arch"
 
-# ---------- CONFIG: tweak to your liking ----------
-USERNAME="${USERNAME:-dev}"            # target user to (create and) configure
-HOSTNAME="${HOSTNAME:-archbox}"        # machine hostname
-TIMEZONE="${TIMEZONE:-America/New_York}"
+ESP_SIZE="+600MiB"       # UEFI only (FAT32)
+BOOT_SIZE="+1GiB"        # /boot outside LVM (ext4)
+
+# LV sizes (any remainder within the VG stays FREE for later lvextend)
+ROOT_SIZE="40G"
+VAR_SIZE="20G"
+VAR_LOG_SIZE="8G"
+VAR_LOG_AUDIT_SIZE="2G"
+VAR_TMP_SIZE="8G"
+TMP_SIZE="8G"
+OPT_SIZE="10G"
+HOME_SIZE="50G"
+
+# System identity
+TZ="${TZ:-America/New_York}"
 LOCALE="${LOCALE:-en_US.UTF-8}"
 KEYMAP="${KEYMAP:-us}"
+HOSTNAME="${HOSTNAME:-archlinux}"
 
-# If you keep your ml4w dotfiles somewhere specific, put it here:
-# Example: https://github.com/mylinuxforwork/ml4w-hyprland
-ML4W_DOTFILES_REPO="${ML4W_DOTFILES_REPO:-}"
-ML4W_DOTFILES_BRANCH="${ML4W_DOTFILES_BRANCH:-main}"
+# User
+USERNAME="${USERNAME:-archuser}"
+USER_PASSWORD="${USER_PASSWORD:-changeme}"
+ROOT_PASSWORD="${ROOT_PASSWORD:-root}"
+SUDO_NOPASSWD="${SUDO_NOPASSWD:-0}"   # 1 to enable NOPASSWD for wheel
 
-# Skip user creation if the user already exists
-CREATE_USER_IF_MISSING="${CREATE_USER_IF_MISSING:-1}"
+###############################################################################
+# HELPERS
+###############################################################################
+msg(){ printf '\n==> %s\n' "$*"; }
 
-# Install a reasonable Hyprland desktop stack
-EXTRA_DESKTOP_PKGS="kitty waybar wofi rofi-wayland grim slurp swappy \
-xdg-desktop-portal xdg-desktop-portal-wlr xdg-desktop-portal-hyprland \
-pipewire pipewire-alsa pipewire-pulse wireplumber polkit-gnome \
-xdg-user-dirs wl-clipboard brightnessctl pavucontrol network-manager-applet \
-ttf-dejavu ttf-liberation noto-fonts"
+ensure_disk_free() {
+  local DEV="$1"
+  umount -R /mnt 2>/dev/null || true
+  swapoff -a 2>/dev/null || true
+  vgchange -an 2>/dev/null || true
+  dmsetup remove_all 2>/dev/null || true
+  udevadm settle || true
+}
 
-# ---------- Helpers ----------
-log()  { printf "\n\033[1;32m[+] %s\033[0m\n" "$*"; }
-warn() { printf "\n\033[1;33m[!] %s\033[0m\n" "$*"; }
-die()  { printf "\n\033[1;31m[x] %s\033[0m\n" "$*"; exit 1; }
+rereadpt_wait() {
+  local DEV="$1" EXPECT="$2"
+  partprobe "$DEV" 2>/dev/null || true
+  blockdev --rereadpt "$DEV" 2>/dev/null || true
+  udevadm settle || true
+  local PSUF=""; case "$DEV" in *[0-9]) PSUF="p" ;; esac
+  local n=1
+  while [ "$n" -le "$EXPECT" ]; do
+    local P="${DEV}${PSUF}${n}"
+    local i=0
+    while [ $i -lt 80 ] && [ ! -b "$P" ]; do i=$((i+1)); sleep 0.1; done
+    n=$((n+1))
+  done
+}
 
-need_root() { [[ "$(id -u)" -eq 0 ]] || die "Run as root."; }
-
-exists() { command -v "$1" &>/dev/null; }
-
-enable_service() {
-  local svc="$1"
-  if systemctl is-enabled --quiet "$svc"; then
-    log "Service already enabled: $svc"
+partition_disk() {
+  local DEV="$1"
+  sgdisk -Z "$DEV"
+  if [ -d /sys/firmware/efi ]; then
+    # UEFI: 1=ESP (ef00), 2=/boot (8300), 3=LVM PV (8e00)
+    sgdisk -n 1:0:"$ESP_SIZE"   -t 1:ef00 -c 1:"EFI"   "$DEV"
+    sgdisk -n 2:0:"$BOOT_SIZE"  -t 2:8300 -c 2:"BOOT"  "$DEV"
+    sgdisk -n 3:0:0             -t 3:8e00 -c 3:"LVM"   "$DEV"
+    rereadpt_wait "$DEV" 3
   else
-    systemctl enable "$svc"
-    log "Enabled: $svc"
+    # BIOS: 1=BIOSBOOT (ef02), 2=/boot (8300), 3=LVM PV (8e00)
+    sgdisk -n 1:1MiB:+1MiB      -t 1:ef02 -c 1:"BIOSBOOT" "$DEV"
+    sgdisk -n 2:0:"$BOOT_SIZE"  -t 2:8300 -c 2:"BOOT"     "$DEV"
+    sgdisk -n 3:0:0             -t 3:8e00 -c 3:"LVM"      "$DEV"
+    rereadpt_wait "$DEV" 3
   fi
-  if systemctl is-active --quiet "$svc"; then
-    log "Service already running: $svc"
+}
+
+calc_parts() {
+  local DEV="$1" PSUF=""
+  case "$DEV" in *[0-9]) PSUF="p" ;; esac
+  if [ -d /sys/firmware/efi ]; then
+    printf '%s;%s;%s;%s\n' "${DEV}${PSUF}1" ""             "${DEV}${PSUF}2" "${DEV}${PSUF}3"
   else
-    systemctl start "$svc"
-    log "Started: $svc"
+    printf '%s;%s;%s;%s\n' ""             "${DEV}${PSUF}1" "${DEV}${PSUF}2" "${DEV}${PSUF}3"
   fi
 }
 
-disable_if_present() {
-  local svc="$1"
-  if systemctl list-unit-files | grep -q "^${svc}.service"; then
-    if systemctl is-active --quiet "$svc"; then
-      systemctl stop "$svc" || true
-    fi
-    if systemctl is-enabled --quiet "$svc"; then
-      systemctl disable "$svc" || true
-    fi
-    log "Disabled: $svc"
-  fi
+purge_old_metadata() {
+  # wipefs old signatures (non-destructive to partition table)
+  for p in "$@"; do
+    [ -n "$p" ] && [ -b "$p" ] && wipefs -a "$p" || true
+  done
 }
 
-user_exists() {
-  id -u "$1" &>/dev/null
+pick_disk_interactive() {
+  local DISKFILE
+  DISKFILE="$(mktemp)"
+  lsblk -dno NAME,SIZE,TYPE,MODEL | awk '$3=="disk"{print "/dev/"$1, $2, $4}' >"$DISKFILE"
+  nl -ba "$DISKFILE" | awk '{printf("  %d) %s %s %s\n", $1, $2, $3, $4)}'
+  local COUNT; COUNT="$(wc -l < "$DISKFILE")"
+  [ "$COUNT" -gt 0 ] || { echo "No disks found."; exit 1; }
+  local choice
+  while :; do
+    printf "Select an available disk [1-%s]: " "$COUNT"
+    read -r choice || true
+    case "$choice" in
+      ''|*[!0-9]*) echo "Enter a number 1..$COUNT" ;;
+      *) [ "$choice" -ge 1 ] && [ "$choice" -le "$COUNT" ] && break || echo "Enter 1..$COUNT" ;;
+    esac
+  done
+  local SELECTED_DEV; SELECTED_DEV="$(sed -n "${choice}p" "$DISKFILE" | awk '{print $1}')"
+  rm -f "$DISKFILE"
+  echo "$SELECTED_DEV"
 }
 
-# ---------- Pre-flight ----------
-need_root
+###############################################################################
+# DISK SELECTION (interactive) — type the number of your target drive
+###############################################################################
+msg "Available disks"
+DISK="${DISK:-}"
+[ -n "${DISK}" ] || DISK="$(pick_disk_interactive)"
+echo "You selected: $DISK"
+printf "This will WIPE %s. Type 'YES' to continue: " "$DISK"; read -r AREYOUSURE
+[ "$AREYOUSURE" = "YES" ] || { echo "Aborted."; exit 1; }
 
-if ! ping -c1 -W2 archlinux.org &>/dev/null; then
-  warn "No ping to archlinux.org; ensure networking is up for package installs."
-fi
+###############################################################################
+# PARTITION → FILESYSTEMS → LVM
+###############################################################################
+msg "Preparing disk and partitioning"
+ensure_disk_free "$DISK"
+partition_disk "$DISK"
 
-log "Refreshing package databases"
-pacman -Sy --noconfirm
+IFS=';' read -r P_ESP P_BIOS P_BOOT P_LVM <<EOF
+$(calc_parts "$DISK")
+EOF
 
-# ---------- Base system config (safe to run in chroot or installed system) ----------
-log "Setting hostname, timezone, keymap, and locale"
+msg "Purging any old FS/LVM metadata"
+purge_old_metadata "$P_LVM" "$P_BOOT" "${P_ESP:-}"
+
+msg "Creating filesystems"
+[ -n "$P_ESP" ] && mkfs.vfat -F32 -n EFI  "$P_ESP"
+mkfs.ext4 -L boot "$P_BOOT"
+
+msg "Setting up LVM"
+partprobe "$DISK" 2>/dev/null || true
+udevadm settle || true
+pvcreate -ff -y "$P_LVM"
+vgcreate "$VG_NAME" "$P_LVM"
+
+# Create fixed LVs; any remainder in the VG is left FREE (on purpose)
+lvcreate -L "$ROOT_SIZE"          -n root          "$VG_NAME"
+lvcreate -L "$VAR_SIZE"           -n var           "$VG_NAME"
+lvcreate -L "$VAR_LOG_SIZE"       -n var_log       "$VG_NAME"
+lvcreate -L "$VAR_LOG_AUDIT_SIZE" -n var_log_audit "$VG_NAME"
+lvcreate -L "$VAR_TMP_SIZE"       -n var_tmp       "$VG_NAME"
+lvcreate -L "$TMP_SIZE"           -n tmp           "$VG_NAME"
+lvcreate -L "$OPT_SIZE"           -n opt           "$VG_NAME"
+lvcreate -L "$HOME_SIZE"          -n home          "$VG_NAME"
+
+mkfs.ext4 -L root /dev/"$VG_NAME"/root
+mkfs.ext4 -L var  /dev/"$VG_NAME"/var
+mkfs.ext4 -L vlog /dev/"$VG_NAME"/var_log
+mkfs.ext4 -L vaud /dev/"$VG_NAME"/var_log_audit
+mkfs.ext4 -L vtmp /dev/"$VG_NAME"/var_tmp
+mkfs.ext4 -L tmp  /dev/"$VG_NAME"/tmp
+mkfs.ext4 -L opt  /dev/"$VG_NAME"/opt
+mkfs.ext4 -L home /dev/"$VG_NAME"/home
+
+msg "Mounting target"
+mount /dev/"$VG_NAME"/root /mnt
+mkdir -p /mnt/{boot,boot/efi,var,var/log,var/log/audit,var/tmp,tmp,opt,home}
+mount "$P_BOOT" /mnt/boot
+[ -n "$P_ESP" ] && mount "$P_ESP" /mnt/boot/efi
+mount /dev/"$VG_NAME"/var           /mnt/var
+mount /dev/"$VG_NAME"/var_log       /mnt/var/log
+mount /dev/"$VG_NAME"/var_log_audit /mnt/var/log/audit
+mount /dev/"$VG_NAME"/var_tmp       /mnt/var/tmp
+mount /dev/"$VG_NAME"/tmp           /mnt/tmp
+mount /dev/"$VG_NAME"/opt           /mnt/opt
+mount /dev/"$VG_NAME"/home          /mnt/home
+
+msg "Current mounts under /mnt"
+findmnt -Rno TARGET,SOURCE /mnt || true
+
+###############################################################################
+# BASE SYSTEM
+###############################################################################
+msg "Pacstrap base + essentials + SDDM"
+pacstrap /mnt base linux linux-firmware lvm2 grub efibootmgr \
+  networkmanager openssh sudo vim reflector \
+  sddm qt6-wayland
+
+msg "Generate fstab"
+genfstab -U /mnt >> /mnt/etc/fstab
+
+###############################################################################
+# CHROOT: system config, bootloader, users, services, Hyprland + GPU
+###############################################################################
+msg "Entering chroot to configure system"
+arch-chroot /mnt /bin/bash -e <<'CHROOT'
+set -euo pipefail
+
+# Import variables passed from parent by writing them before the heredoc
+CHROOT
+# Re-open heredoc with variables expanded into the environment of the chroot
+arch-chroot /mnt /bin/bash -e <<CHROOT
+set -euo pipefail
+
+# ---------------- System identity ----------------
 echo "$HOSTNAME" > /etc/hostname
+cat >/etc/hosts <<EOF
+127.0.0.1   localhost
+::1         localhost
+127.0.1.1   $HOSTNAME.localdomain $HOSTNAME
+EOF
 
-ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
+ln -sf "/usr/share/zoneinfo/$TZ" /etc/localtime
 hwclock --systohc
 
-# Ensure locale is present in /etc/locale.gen
-if ! grep -q "^${LOCALE} UTF-8" /etc/locale.gen; then
-  sed -i "s/^#\(${LOCALE} UTF-8\)/\1/" /etc/locale.gen || echo "${LOCALE} UTF-8" >> /etc/locale.gen
-fi
+sed -i "s/^#\(${LOCALE} UTF-8\)/\1/" /etc/locale.gen || echo "${LOCALE} UTF-8" >> /etc/locale.gen
 locale-gen
 echo "LANG=${LOCALE}" > /etc/locale.conf
 echo "KEYMAP=${KEYMAP}" > /etc/vconsole.conf
 
-# ---------- Networking ----------
-log "Installing & enabling NetworkManager"
-pacman -S --noconfirm --needed networkmanager
-enable_service NetworkManager
+# ---------------- mkinitcpio with lvm2 ----------------
+if grep -q '^HOOKS=' /etc/mkinitcpio.conf; then
+  sed -i 's/\(^HOOKS=.*\)block/\1block lvm2/' /etc/mkinitcpio.conf || true
+fi
+mkinitcpio -P
 
-# ---------- User setup ----------
-if [[ "$CREATE_USER_IF_MISSING" -eq 1 ]]; then
-  if user_exists "$USERNAME"; then
-    log "User exists: $USERNAME"
-  else
-    log "Creating user: $USERNAME"
-    useradd -m -G wheel,video,audio,input "$USERNAME"
-    passwd "$USERNAME"
-  fi
+# ---------------- Bootloader (UEFI or BIOS) ----------------
+if [ -d /sys/firmware/efi ]; then
+  pacman -Sy --noconfirm grub efibootmgr
+  mkdir -p /boot/efi
+  grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB
+else
+  pacman -Sy --noconfirm grub
+  # The parent script will pass DISK via environment; fall back to guessing root disk
+  DISK_GUESS="$(lsblk -no pkname "$(findmnt -no SOURCE /)" | head -n1)"
+  [ -n "$DISK" ] || DISK="/dev/${DISK_GUESS}"
+  grub-install --target=i386-pc "$DISK"
+fi
+grub-mkconfig -o /boot/grub/grub.cfg
+
+# ---------------- Users & sudo ----------------
+echo "root:${ROOT_PASSWORD}" | chpasswd
+id -u "$USERNAME" >/dev/null 2>&1 || useradd -m -G wheel -s /bin/bash "$USERNAME"
+echo "${USERNAME}:${USER_PASSWORD}" | chpasswd
+sed -i 's/^# *%wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
+if [ "$SUDO_NOPASSWD" = "1" ]; then
+  echo '%wheel ALL=(ALL:ALL) NOPASSWD: ALL' >/etc/sudoers.d/99-wheel-nopasswd
+  chmod 440 /etc/sudoers.d/99-wheel-nopasswd
 fi
 
-if ! grep -qE '^%wheel ALL=\(ALL:ALL\) NOPASSWD: ALL' /etc/sudoers; then
-  log "Configuring sudo for wheel (NOPASSWD)"
-  sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
-  echo '%wheel ALL=(ALL:ALL) NOPASSWD: ALL' >> /etc/sudoers
-fi
+# ---------------- Services ----------------
+systemctl enable NetworkManager
+systemctl enable sshd
+systemctl enable sddm
+systemctl set-default graphical.target
 
-# ---------- Display Manager: switch to SDDM ----------
-log "Installing SDDM"
-pacman -S --noconfirm --needed sddm
+# ---------------- Hyprland + desktop stack ----------------
+pacman -Sy --noconfirm --needed \
+  hyprland xorg-xwayland \
+  kitty waybar rofi-wayland wofi \
+  pipewire pipewire-alsa pipewire-pulse wireplumber \
+  xdg-desktop-portal xdg-desktop-portal-hyprland \
+  wl-clipboard grim slurp swappy brightnessctl pavucontrol \
+  polkit-gnome ttf-dejavu ttf-liberation noto-fonts noto-fonts-emoji
 
-log "Disabling other display managers if present"
-for dm in gdm lightdm lxdm ly greetd; do
-  disable_if_present "$dm"
-done
+# GPU auto-detect (fallback to mesa)
+GPU_LINE="$(lspci -nnk | grep -E 'VGA|3D|Display' | head -n1 || true)"
+case "$GPU_LINE" in
+  *NVIDIA*|*nVidia*|*GeForce*)
+    pacman -Sy --noconfirm --needed nvidia nvidia-utils nvidia-settings
+    if [ -f /etc/default/grub ]; then
+      sed -i 's/^GRUB_CMDLINE_LINUX="\([^"]*\)"/GRUB_CMDLINE_LINUX="\1 nvidia_drm.modeset=1"/' /etc/default/grub || true
+      grub-mkconfig -o /boot/grub/grub.cfg >/dev/null || true
+    fi
+    ;;
+  *AMD*|*Advanced\ Micro\ Devices*|*Radeon*)
+    pacman -Sy --noconfirm --needed mesa vulkan-radeon libva-mesa-driver ;;
+  *Intel*|*UHD*|*Iris*)
+    pacman -Sy --noconfirm --needed mesa vulkan-intel intel-media-driver ;;
+  *)
+    pacman -Sy --noconfirm --needed mesa ;;
+esac
 
-log "Enabling SDDM"
-enable_service sddm
-
-# ---------- Hyprland + Wayland desktop stack ----------
-log "Installing Hyprland and desktop packages"
-pacman -S --noconfirm --needed hyprland ${EXTRA_DESKTOP_PKGS}
-
-# ---------- SDDM Session for ml4w-Hyprland ----------
-ML4W_SESSION_FILE="/usr/share/wayland-sessions/ml4w-hyprland.desktop"
-if [[ ! -f "$ML4W_SESSION_FILE" ]]; then
-  log "Creating ml4w-Hyprland SDDM session"
-  cat > "$ML4W_SESSION_FILE" <<'EOF'
-[Desktop Entry]
-Name=ml4w-Hyprland
-Comment=Hyprland session with ml4w config
-Exec=/usr/bin/Hyprland
-Type=Application
-DesktopNames=ml4w-hyprland;Hyprland
+# SDDM Wayland config
+install -d -m 755 /etc/sddm.conf.d
+cat >/etc/sddm.conf.d/10-wayland.conf <<'EOF'
+[General]
+DisplayServer=wayland
+[Wayland]
+CompositorCommand=/usr/bin/kwin_wayland --no-lockscreen --no-global-shortcuts
+EnableHiDPI=true
 EOF
-else
-  log "ml4w-Hyprland session already exists"
-fi
 
-# ---------- Dotfiles (optional but recommended) ----------
-if [[ -n "$ML4W_DOTFILES_REPO" ]]; then
-  if ! user_exists "$USERNAME"; then
-    warn "User $USERNAME does not exist; skipping dotfiles clone."
-  else
-    log "Cloning ml4w dotfiles for $USERNAME"
-    sudo -u "$USERNAME" bash -c "
-      set -euo pipefail
-      umask 022
-      mkdir -p \"\$HOME/.config\"
-      if [[ ! -d \"\$HOME/.local/share\" ]]; then mkdir -p \"\$HOME/.local/share\"; fi
-      if [[ ! -d \"\$HOME/.ml4w-dots\" ]]; then
-        git clone --depth 1 -b \"$ML4W_DOTFILES_BRANCH\" \"$ML4W_DOTFILES_REPO\" \"\$HOME/.ml4w-dots\"
-      else
-        cd \"\$HOME/.ml4w-dots\" && git fetch && git checkout \"$ML4W_DOTFILES_BRANCH\" && git pull
-      fi
+# Minimal Hyprland config for the user (safe starter)
+USER_HOME="$(getent passwd "$USERNAME" | cut -d: -f6)"
+install -d -m 755 "$USER_HOME/.config/hypr"
+cat >"$USER_HOME/.config/hypr/hyprland.conf" <<'EOF'
+monitor=,preferred,auto,1
+exec-once=waybar
+exec-once=nm-applet
+bind=SUPER,RETURN,exec,kitty
+bind=SUPER,Q,killactive
+bind=SUPER,ESC,exit
+bind=SUPER,D,exec,wofi --show drun
+EOF
+chown -R "$USERNAME:$USERNAME" "$USER_HOME/.config"
 
-      # Example: sync configs (adjust to match your repo layout)
-      # rsync -a --delete \"\$HOME/.ml4w-dots/config/\" \"\$HOME/.config/\"
-    "
-  fi
-else
-  warn "ML4W_DOTFILES_REPO not set. Skipping dotfiles."
-fi
+CHROOT
 
-# ---------- XDG user directories (nice-to-have) ----------
-if user_exists "$USERNAME"; then
-  log "Ensuring xdg-user-dirs for $USERNAME"
-  sudo -u "$USERNAME" env HOME="/home/$USERNAME" xdg-user-dirs-update || true
-fi
-
-# ---------- NVIDIA note (optional) ----------
-# If you have NVIDIA and need proper Wayland bits, uncomment:
-# pacman -S --noconfirm --needed nvidia nvidia-utils nvidia-settings
-# echo "options nvidia_drm modeset=1" > /etc/modprobe.d/nvidia-drm.conf
-# mkinitcpio -P
-
-# ---------- MERGE HERE: from your old scripts ----------
-# If your previous install.sh/setup.sh/hyprland.sh included extra steps
-# (fonts, theming, shell, terminal setup, extra services, etc.),
-# paste them below this line. Keep things idempotent where possible.
-#
-# Example:
-# pacman -S --noconfirm --needed zsh zsh-completions starship
-# chsh -s /bin/zsh "$USERNAME"
-#
-# ---------- END MERGE ZONE ----------
-
-log "All done! Reboot to land in SDDM → select 'ml4w-Hyprland'."
+echo
+msg "Install complete. Remove the USB and reboot into SDDM → select Hyprland."
 
