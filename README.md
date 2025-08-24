@@ -3,7 +3,7 @@
 how to install arch
 
 ## Automated Installation
-1. wget or curl each of the three .sh files
+1. wget or curl install.sh
 2. chmod +x *.sh
 3. ./install.sh
 4. If you wish to customize username, password, hostname, etc, pass those as environment variables
