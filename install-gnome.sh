@@ -247,20 +247,36 @@ USER_EOF
 
 install_desktop() {
     arch-chroot /mnt /bin/bash <<'DESKTOP_EOF'
-set +e
+set -euo pipefail
 pacman -Syu --noconfirm
 
 # Install GNOME desktop environment and essential applications
+# Install all packages from gnome and gnome-extra groups without prompting
+yes '' | pacman --noconfirm --needed -S gnome gnome-extra
 pacman --noconfirm --needed -S \
-    gnome gnome-extra gnome-terminal firefox chromium \
-    nautilus-extensions file-roller \
+    firefox chromium \
     ttf-liberation ttf-dejavu noto-fonts noto-fonts-emoji \
-    flatpak
+    flatpak \
+    libreoffice-fresh \
+    vlc \
+    gimp \
+    htop \
+    neofetch \
+    wget \
+    curl \
+    unzip \
+    zip \
+    tree
+
+# Verify a terminal emulator was installed (gnome-console is the new default)
+if ! pacman -Q gnome-console >/dev/null 2>&1 && ! pacman -Q gnome-terminal >/dev/null 2>&1; then
+    echo "ERROR: No GNOME terminal emulator installed"
+    exit 1
+fi
 
 # Enable Flathub repository
 flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 
-set -e
 DESKTOP_EOF
 }
 
